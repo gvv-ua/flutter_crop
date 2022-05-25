@@ -1,8 +1,7 @@
-import 'dart:ui' as ui;
 import 'dart:math';
+import 'dart:ui' as ui;
 
 import 'package:crop/src/crop_render.dart';
-import 'package:collision/collision.dart';
 import 'package:crop/src/matrix_decomposition.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -23,6 +22,7 @@ class Crop extends StatefulWidget {
   final BoxShape shape;
   final ValueChanged<MatrixDecomposition>? onChanged;
   final Duration animationDuration;
+  final bool disableRotation;
 
   const Crop({
     Key? key,
@@ -39,6 +39,7 @@ class Crop extends StatefulWidget {
     this.shape = BoxShape.rectangle,
     this.onChanged,
     this.animationDuration = const Duration(milliseconds: 200),
+    this.disableRotation = false,
   }) : super(key: key);
 
   @override
@@ -69,6 +70,7 @@ class _CropState extends State<Crop> with TickerProviderStateMixin {
   final _key = GlobalKey();
   final _parent = GlobalKey();
   final _repaintBoundaryKey = GlobalKey();
+  final _childKey = GlobalKey();
 
   double _previousScale = 1;
   Offset _previousOffset = Offset.zero;
@@ -114,66 +116,44 @@ class _CropState extends State<Crop> with TickerProviderStateMixin {
   }
 
   void _reCenterImage([bool animate = true]) {
-    //final totalSize = _parent.currentContext.size;
-
     final sz = _key.currentContext!.size!;
     final s = widget.controller._scale * widget.controller._getMinScale();
-    final w = sz.width;
-    final h = sz.height;
-    final offset = _toVector2(widget.controller._offset);
-    final canvas = Rectangle.fromLTWH(0, 0, w, h);
-    final obb = Obb2(
-      center: offset + canvas.center,
-      width: w * s,
-      height: h * s,
-      rotation: widget.controller._rotation,
-    );
+    final childWidgetSize =
+        (_childKey.currentContext?.findRenderObject() as RenderBox).size;
 
-    final bakedObb = obb.bake();
+    double w, h;
+    final ratio = childWidgetSize.aspectRatio / sz.aspectRatio;
+    if (childWidgetSize.aspectRatio < 1.0) {
+      // Vertical image. Height needs to be rescaled according to ratio.
+      w = sz.width;
+      h = sz.height / ratio;
+    } else {
+      // Horizontal or square image. Width needs to be rescaled according to ratio (for square ratio is 1.0).
+      w = sz.width * ratio;
+      h = sz.height;
+    }
+
+    final canvas = Rect.fromLTWH(0, 0, w, h);
+    final imageBoundaries = Rect.fromCenter(
+        center: widget.controller._offset + canvas.center,
+        width: w * s * cos(vm.radians(widget.controller._rotation)).abs() +
+            h * s * sin(vm.radians(widget.controller._rotation)).abs(),
+        height: w * s * sin(vm.radians(widget.controller._rotation)).abs() +
+            h * s * cos(vm.radians(widget.controller._rotation)).abs());
+
+    var clampBoundaries = Rect.fromCenter(
+        center: Offset.zero,
+        width: ((imageBoundaries.width - sz.width).abs().floorToDouble()),
+        height: (imageBoundaries.height - sz.height).abs().floorToDouble());
+
+    final clampedOffset = Offset(
+        widget.controller._offset.dx
+            .clamp(clampBoundaries.left, clampBoundaries.right),
+        widget.controller._offset.dy
+            .clamp(clampBoundaries.top, clampBoundaries.bottom));
 
     _startOffset = widget.controller._offset;
-    _endOffset = widget.controller._offset;
-
-    final ctl = canvas.topLeft;
-    final ctr = canvas.topRight;
-    final cbr = canvas.bottomRight;
-    final cbl = canvas.bottomLeft;
-
-    final ll = Line(bakedObb.topLeft, bakedObb.bottomLeft);
-    final tt = Line(bakedObb.topRight, bakedObb.topLeft);
-    final rr = Line(bakedObb.bottomRight, bakedObb.topRight);
-    final bb = Line(bakedObb.bottomLeft, bakedObb.bottomRight);
-
-    final tl = ll.project(ctl);
-    final tr = tt.project(ctr);
-    final br = rr.project(cbr);
-    final bl = bb.project(cbl);
-
-    final dtl = ll.distanceToPoint(ctl);
-    final dtr = tt.distanceToPoint(ctr);
-    final dbr = rr.distanceToPoint(cbr);
-    final dbl = bb.distanceToPoint(cbl);
-
-    if (dtl > 0) {
-      final d = _toOffset(ctl - tl);
-      _endOffset += d;
-    }
-
-    if (dtr > 0) {
-      final d = _toOffset(ctr - tr);
-      _endOffset += d;
-    }
-
-    if (dbr > 0) {
-      final d = _toOffset(cbr - br);
-      _endOffset += d;
-    }
-    if (dbl > 0) {
-      final d = _toOffset(cbl - bl);
-      _endOffset += d;
-    }
-
-    widget.controller._offset = _endOffset;
+    widget.controller._offset = _endOffset = clampedOffset;
 
     if (animate) {
       if (_controller.isCompleted || _controller.isAnimating) {
@@ -197,7 +177,7 @@ class _CropState extends State<Crop> with TickerProviderStateMixin {
 
     // In the case where lesser than 2 fingers involved in scaling, we ignore
     // the rotation handling.
-    if (details.pointerCount > 1) {
+    if (details.pointerCount > 1 && !widget.disableRotation) {
       // In the first touch, we reset all the values.
       if (_previousPointerCount != details.pointerCount) {
         _previousPointerCount = details.pointerCount;
@@ -255,7 +235,7 @@ class _CropState extends State<Crop> with TickerProviderStateMixin {
             ..rotateZ(r)
             ..scale(s, s, 1),
           child: FittedBox(
-            child: widget.child,
+            child: Container(key: _childKey, child: widget.child),
             fit: BoxFit.cover,
           ),
         ),
